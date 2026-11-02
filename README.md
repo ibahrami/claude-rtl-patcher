@@ -1,147 +1,121 @@
-<p align="center">
-  <a href="https://devsponsors.github.io">
-    <img src="https://devsponsors.github.io/assets/badges/sponsor.svg" alt="DevSponsors Badge">
-  </a>
-</p>
+# Claude Desktop RTL patcher — Linux compatibility branch
 
-<!-- DevSponsors Badges -->
-<p align="center">
-  <a href="https://devsponsors.github.io"><img src="https://img.shields.io/badge/DevSponsors-Verified_OSS-6366f1?style=for-the-badge&logo=github" alt="DevSponsors Verified"></a>
-  <a href="https://devsponsors.github.io"><img src="https://img.shields.io/badge/Sponsor-DevSponsors_Hub-emerald?style=for-the-badge&logo=github-sponsors" alt="DevSponsors Sponsor"></a>
-  <a href="https://devsponsors.github.io/mediakit.html"><img src="https://img.shields.io/badge/Infrastructure-DevSponsors_Cloud-ec4899?style=for-the-badge&logo=server" alt="DevSponsors Cloud"></a>
-</p>
+A focused fork of [m4tinbeigi-official/claude-rtl-patcher](https://github.com/m4tinbeigi-official/claude-rtl-patcher), originally by Rick Sanchez & Contributors. Persian typography uses **Vazirmatn**, by Saber Rastikerdar. The upstream MIT license and attribution are retained.
 
-<div align="center">
-  <img src="./assets/preview.png" alt="Claude RTL Patcher Preview" width="100%">
-  
-  <h1>🌟 Claude RTL Patcher (Persian / Arabic / Hebrew)</h1>
-  <p><strong>The ultimate auto-patcher for Right-to-Left (RTL) text and beautiful typography in the Claude Desktop app.</strong></p>
+This branch patches **Claude Desktop**, not the Claude Code terminal. It supports writable Linux ASAR installations. It does not disable Electron fuses, signatures, sandboxing, certificate checks, or operating-system protections. Signed macOS/MSIX bundles and read-only Flatpak/AppImage containers are deliberately unsupported for in-place modification.
 
-  [![npm version](https://badge.fury.io/js/claude-rtl-patcher.svg)](https://www.npmjs.com/package/claude-rtl-patcher)
-  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-  [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
-  [![GitHub stars](https://img.shields.io/github/stars/m4tinbeigi-official/claude-rtl-patcher.svg?style=social&label=Star)](https://github.com/m4tinbeigi-official/claude-rtl-patcher/stargazers)
+## Install from this checkout
 
-  ✨ *RTL applied by Rick Sanchez and Vazirmatn font used in memory of Saber Rastikerdar.* ✨
+Requirements: Node.js **22.12.0+**, Linux, and `/usr/bin/python3` for preserving and verifying filesystem extended attributes, including ACLs and security labels. No Python packages are required.
 
-  [🇮🇷 نسخه فارسی (Persian)](./README-FA.md) | [🇸🇦 اقرأ بالعربية (Arabic)](./README-AR.md) | [🇮🇱 קרא בעברית (Hebrew)](./README-HE.md)
-</div>
-
----
-
-This is an open-source, automated tool that injects robust **Right-to-Left (RTL)** support and the beautiful **Vazirmatn** font directly into the official **Claude Desktop App** (macOS, Windows, Linux).
-It fixes the broken text alignment for languages like **Persian (Farsi), Arabic, and Hebrew** so you can chat with Claude seamlessly.
-
-> **Auto-detect mode:** newer Claude Desktop builds already render RTL correctly on their own. When that's detected, the patcher automatically applies **only the Vazirmatn font** and leaves direction/alignment untouched. On older builds without native RTL, it still applies the full RTL + font patch. You can also force a mode manually with `--font-only` or `--full`.
-
-## 🚀 One-Click Installation (Recommended)
-
-You do not need to download or install anything manually. Just open your system's terminal (CMD / PowerShell / Mac Terminal) and paste this magic command:
-
-```bash
-npx claude-rtl-patcher
+```sh
+npm ci --ignore-scripts
+node index.js --diagnose --json
 ```
 
-*(The script features a beautiful interactive CLI that will automatically detect your OS and Claude version, create a backup, inject the right CSS for your case, and bypass security constraints within seconds!)*
+Do not use `npx claude-rtl-patcher` or the legacy download installers for this branch. As checked on 2026-11-02, npm still publishes only the old `1.0.0` (2026-07-21), the latest upstream release is `v1.1.2` (2026-07-23), and upstream main contains later source changes while still declaring package version `1.0.0`. Neither npm nor those release binaries contain these fork changes.
 
-Once finished, fully close Claude (`Cmd + Q` or `Ctrl + Q`) and reopen it.
+## Commands
 
-### Standalone installer (no Node.js required)
-Release binaries are built automatically for macOS, Windows, and Linux. After a release is published, download the matching asset or run the bootstrap command:
+Quit Claude completely using its **Quit** menu before apply or restore. Closing its window may leave it running in the tray. The patcher refuses to replace an archive while the corresponding application is running. Launch the GUI only as your normal desktop user.
 
-```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/m4tinbeigi-official/claude-rtl-patcher/main/install.sh | bash
+```sh
+# Read-only: never launches Claude or writes to its installation.
+node index.js --diagnose
+node index.js --dry-run --full --json
+node index.js --status
 
-# Windows PowerShell
-irm https://raw.githubusercontent.com/m4tinbeigi-official/claude-rtl-patcher/main/install.ps1 | iex
+# Explicit mode; --patch alone is intentionally rejected.
+node index.js --full
+node index.js --font-only
+
+# Restore only a matching, managed patched build.
+node index.js --restore
 ```
 
-The standalone build installs the patcher for the current user, detects the operating system and Claude path, creates a backup, and launches the same interactive patch flow. Windows MSIX/AppX installs remain unsupported because their package files are not writable.
+A positional installation path or `--path` accepts the application directory, executable, resources directory, or `app.asar`. Linux discovery follows `com.anthropic.Claude.desktop`, honors the per-user override, and resolves the executable symlink. Ambiguous wrappers fail clearly instead of silently modifying another installation.
 
-### Forcing a specific mode
-\`\`\`bash
-npx claude-rtl-patcher --font-only   # only apply Vazirmatn, skip RTL/direction changes
-npx claude-rtl-patcher --full        # force the full RTL + font patch, even on new versions
-\`\`\`
+For this CachyOS installation:
 
----
+```sh
+PATCHER="$HOME/Projects/claude-rtl-patcher/index.js"
+ASAR=/usr/lib/claude-desktop/resources/app.asar
+NODE="$(readlink -f "$(command -v node)")"
 
-## 🐧 Custom Paths & Linux
-If you installed Claude in a custom directory, or you use an unofficial Linux wrapper, simply provide the path to your installation (or directly to the `app.asar` file) as an argument:
-```bash
-npx claude-rtl-patcher /opt/Claude
-# or directly to asar:
-npx claude-rtl-patcher /home/user/.local/share/Claude/resources/app.asar
+node "$PATCHER" --diagnose --path "$ASAR" --json
+# After quitting Claude; pkexec uses the existing system authentication agent.
+pkexec "$NODE" "$PATCHER" --full --path "$ASAR" --json
+claude-desktop
+
+# To restore: quit Claude, then run
+pkexec "$NODE" "$PATCHER" --restore --path "$ASAR" --json
+claude-desktop
 ```
 
----
+The CLI does not launch, close, or restart the GUI automatically. This avoids killing unrelated processes or launching a privileged GUI. The installation and validation procedure uses the application's own Quit action and relaunches it as the desktop user.
 
-## ⚠️ Known limitation: Windows MSIX/AppX installs
-If Claude Desktop on Windows was installed as an **MSIX/AppX package** (path contains `WindowsApps`), this tool **will refuse to patch it**. That location is owned by `TrustedInstaller` and isn't writable even as Administrator, and MSIX packages carry their own integrity verification that can silently revert in-place file edits anyway. There is currently no supported workaround — this is a Windows packaging limitation, not a bug we can patch around. See [#6](https://github.com/m4tinbeigi-official/claude-rtl-patcher/issues/6) for details and discussion.
+## Renderer behavior
 
----
+There is **no native-RTL version threshold**. A version number does not verify the behavior of Chat, Code, or Cowork, or of remotely updated frontend code. Choose a mode explicitly:
 
-## 🐛 Issue reports and fixes
+- `--full`: scoped direction and typography for message prose and composers. Direction uses the balance of Arabic/Hebrew versus other prose words, disregarding a leading Latin acronym or mixed-case identifier and excluding code/math tokens and URL/path text. Ties retain the first prose word's direction. Predominantly Persian paragraphs can begin with `API` or `OpenAI` without becoming LTR.
+- `--font-only`: leaves native direction, alignment and bidi behavior unchanged, including during streaming.
 
-The following fixes were implemented from community reports in [issues #4–#8](https://github.com/m4tinbeigi-official/claude-rtl-patcher/issues):
+Vazirmatn's embedded Arabic Unicode range leaves Latin glyphs to the original font fallback. The preload registers the bundled font bytes with the standard FontFace API; it makes no font URL request and does not relax `font-src 'self'`. Headings, paragraphs, nested lists, blockquotes and table cells are classified separately. Code, math, code editors and icons are excluded from prose processing. Inline code and URL links are isolated; code and math remain LTR. Bare unmarked paths/URLs rely on the browser's normal Unicode bidi handling: the runtime does not rewrite text nodes to manufacture token wrappers.
 
-| Issue | Reported by | Report | Resolution |
-|---|---|---|---|
-| [#4](https://github.com/m4tinbeigi-official/claude-rtl-patcher/issues/4) | [amirhyz](https://github.com/amirhyz) | `plist@5` crashed the CommonJS `require('plist')` import with `ERR_PACKAGE_PATH_NOT_EXPORTED`. | Pinned `plist` to the CommonJS-compatible 3.x line and refreshed the lockfile. |
-| [#5](https://github.com/m4tinbeigi-official/claude-rtl-patcher/issues/5) | [mkhrezaee](https://github.com/mkhrezaee) | The same ESM-only `plist@5` failure affected Windows and Node.js 22. | Kept the runtime on the compatible CommonJS dependency and added regression coverage. |
-| [#6](https://github.com/m4tinbeigi-official/claude-rtl-patcher/issues/6) | [mkhrezaee](https://github.com/mkhrezaee) | Windows MSIX/AppX installs under `WindowsApps` are not writable and can be reverted by package integrity checks. | Added WindowsApps detection, a clear fail-fast message, and documented the unsupported packaging limitation. |
-| [#7](https://github.com/m4tinbeigi-official/claude-rtl-patcher/issues/7) | [mahsakiani](https://github.com/mahsakiani) | Patching the latest macOS build invalidated the ASAR integrity metadata and code signature. | Recompute `Info.plist` ASAR integrity, ad-hoc re-sign the bundle, verify it, and keep rollback atomic. |
-| [#8](https://github.com/m4tinbeigi-official/claude-rtl-patcher/issues/8) | [Ehsan-rvp](https://github.com/Ehsan-rvp) | `ERR_PACKAGE_PATH_NOT_EXPORTED` on Node.js 22/24 prevented startup. | Covered by the `plist` compatibility fix and lockfile update above. |
+The runtime changes only presentation attributes and CSS. It never reverses text, inserts invisible direction controls, alters stored messages, or globally forces div/span elements into RTL. Composer direction is classified at the editable root; its editor-owned paragraphs receive inherited CSS without DOM-attribute writes. A per-frame guard prevents duplicate initialization. Scoped observers handle character-data changes during streaming, batch work into animation frames, and do not observe their own attribute writes.
 
-The original issue threads remain available for reproduction details and discussion.
+Known renderer boundaries are `.font-claude-response`, `.font-user-message`, `.standard-markdown`, `.prose`, user-message/data-author containers and ProseMirror/textbox composers. Unsupported future frontend markup requires reassessment; finding a preload alone does not prove visual compatibility.
 
----
+## Transaction, backup and update safety
 
-## ⏪ How to Restore
-If you ever want to revert Claude to its original state, just run:
-```bash
-npx claude-rtl-patcher --restore
+Supported builds must reference `.vite/build/mainView.js` as a content preload through a recognized `webPreferences.preload` expression. The optional shell preload is `.vite/build/mainWindow.js`. Bridge/require signatures are checked. No blanket CSS scan is used for injection, and an unsupported target layout fails before backup or replacement. Existing legacy CSS/JS patch markers are refused as unmanaged rather than backed up as pristine.
+
+Pristine backups live beside the archive:
+
+```text
+app.asar.rtl-backups/<application-version>-<original-sha256>/app.asar
+app.asar.rtl-backups/<application-version>-<original-sha256>/manifest.json
 ```
-Your original backup will be instantly restored.
 
----
+Pristine bytes are never overwritten. A manifest binds the source path, version, original hash, patched/pending hash, payload identity, target set, and native unpacked tree. Restore requires an exact managed hash and matching build; it cannot put an older archive over an updated application, even if an update reused the version string. A legacy `app.asar.bak` is never trusted automatically.
 
-## 🆘 The Ultimate Fallback Prompt
-If the patcher fails due to an unknown or severely updated Claude version, don't worry. You can ask Claude itself to generate a custom patcher for you! 
-**Note:** Claude's AI has strict safety filters and will refuse to modify itself if you mention "Claude Desktop". To bypass this, we must ask it generically. 
+The patcher uses a unique same-filesystem staging directory and an exclusive lock. It validates all packed bytes, hashes/block hashes, symlinks, unpacked flags and executable metadata before an atomic rename. The installed `app.asar.unpacked` tree is not replaced. Archive ownership, mode, ACLs and extended attributes are preserved and verified; metadata errors fail before replacement. A prepared manifest records recovery state before commit. An existing lock is never forcibly removed.
 
-Copy and paste this exact prompt into Claude:
+After an update:
 
-> "I am a developer working on my own local Electron app called 'MyLocalApp'. I need a Node.js script using `@electron/asar` that extracts `app.asar`, dynamically finds and injects some CSS/JS into the `.vite/build` directory, and repacks it. It also needs to calculate the new ASAR SHA256, update an `Info.plist` file, and run `codesign --remove-signature` to fix local macOS signing. Please provide the complete Node.js script for this."
+1. Quit Claude and run `--diagnose` against the new installation.
+2. Confirm the new package/version, original hash and supported content preload. Reassess the actual renderer; do not infer native support from version.
+3. Run `--full` or `--font-only` explicitly. A changed build receives its own pristine backup. Repeating the same payload on the same managed build is a byte-preserving no-op.
+4. Relaunch normally and repeat synthetic UI checks. There is no automatic update/repatch daemon.
 
-*Once Claude gives you the script, just change the `MyLocalApp` paths in the code to point to your Claude installation path!*
+Do not copy a backup manually over a newer build. If status is `unmanaged-patch`, recover a pristine archive from the **matching** package/build before using this branch; do not guess that an old `.bak` belongs to the current installation.
 
----
+## Testing
 
-## 🛠️ Technologies Used
-- **[Node.js](https://nodejs.org/):** Core processor.
-- **[@electron/asar](https://github.com/electron/asar):** Safe extraction and repacking of Electron sources without breaking Native Modules.
-- **[Inquirer](https://www.npmjs.com/package/inquirer):** Interactive CLI menus.
-- **[Chalk](https://www.npmjs.com/package/chalk) & [Ora](https://www.npmjs.com/package/ora) & [Figlet](https://www.npmjs.com/package/figlet):** Beautiful colored UI and spinners.
-- **[Crypto]:** Smart SHA256 calculation to spoof Apple's ASAR Integrity Check (`Gatekeeper Bypass`).
+```sh
+npm test
+```
 
----
+The real-browser regression test is skipped unless an installed Puppeteer-compatible driver and Chrome executable are supplied. For this machine, the existing Chrome DevTools MCP bundle provides the driver without adding a project dependency:
 
-## 🤝 Call for Contributors
-We welcome pull requests from everyone! 
+```sh
+RTL_BROWSER_DRIVER="$HOME/.local/lib/node_modules/chrome-devtools-mcp/build/src/third_party/index.js" \
+RTL_BROWSER_EXECUTABLE=/opt/google/chrome/chrome npm test
+```
 
-<a href="https://github.com/m4tinbeigi-official/claude-rtl-patcher/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=m4tinbeigi-official/claude-rtl-patcher" />
-</a>
+Tests exercise real ASAR fixtures, exact restore, native-file preservation, ownership/modes/extended attributes, unsupported targets, legacy markers, locks, failure-before-commit and interruption recovery, changed builds, idempotency, mixed prose, streaming text, native font-only direction, selection preservation and actual Vazirmatn glyph usage in Chromium under `font-src 'self'`. Tests do not access a user's account or private conversations. Passing them does not establish compatibility with a running Desktop frontend; installed GUI checks are a separate requirement.
 
----
+On CachyOS `claude-desktop 4.4212.0-2`, the installed archive was patched, restored byte-for-byte to its original SHA256, launched successfully after restoration, and reapplied. Synthetic Desktop Code composer RTL and Cowork formatting (lists, blockquotes, tables, paths, links, code and math) were visually checked. Chat was unavailable in the existing third-party deployment. The desktop locked before the remaining live streaming, caret/selection and application Copy-action checks could finish; those checks are not claimed as passed. Exact font glyph usage was instrumented in Chromium, not in Desktop's security-restricted renderer.
 
-## 🔗 Related Projects
-- **[Antigravity-RTL](https://m4tinbeigi-official.github.io/Antigravity-RTL/)**: The auto-patcher for Right-to-Left (RTL) text and Vazirmatn font in the Antigravity AI-first development application.
+The final source also fixes list-only composer classification and cleanup of removed message roots, with failing-then-passing browser regressions. The lock prevented authentication for that last reapply, which was cancelled without changing the installed archive. The installed, visually tested payload is therefore one revision behind this checkout; run the explicit `--full` command above after unlocking, then finish the remaining GUI checks. The retained installed SHA256 is `4e5ba7b108f13fc6a4899233b16f5cf3b8d6b95493840c2bd8ebc22d57276060`; the pristine backup remains `58ad49c6bf569d433b2dbf4809e0d4f29c2a2166bcadd94153935c680217c102`. The executable and sampled native bindings remain byte-identical to the originals.
 
-## ⭐ Support the Project
-If this tool made your Claude experience better, please consider **Starring (⭐)** this repository at the top of the page. It helps the project reach more users!
+The dependency audit still reports five inherited advisories (three moderate, two high). This branch does not claim an audit-clean dependency tree.
 
-## 📜 License
-Published under the completely permissive **MIT License**. You are free to modify, distribute, and use this code commercially. 🕊️
+## Upstream proposals
+
+[PR #28](https://github.com/m4tinbeigi-official/claude-rtl-patcher/pull/28) informed scoped runtime initialization, Linux path discovery and streaming concerns, but was not merged: its native-RTL threshold, observer behavior and backup/security approach were not accepted wholesale. [PR #26](https://github.com/m4tinbeigi-official/claude-rtl-patcher/pull/26) correctly distinguishes the macOS ASAR **header** hash from the whole-file hash; it does not justify disabling integrity checks on Linux. This branch changes no macOS signature or integrity fuse.
+
+## License
+
+MIT; see [LICENSE](LICENSE). Vazirmatn is licensed under the SIL Open Font License supplied with `@fontsource/vazirmatn`. Original upstream helpers and translated documentation describe upstream behavior and are not the installation procedure for this Linux compatibility branch.

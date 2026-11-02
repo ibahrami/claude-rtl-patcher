@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { resolveAppPaths, isWindowsAppsPath } = require('../lib/platform');
-const { reSignMacApp } = require('../lib/macos');
+const path = require('node:path');
 
 test('resolves a custom macOS app bundle', () => {
     const paths = resolveAppPaths({
@@ -30,15 +30,37 @@ test('detects WindowsApps paths with either path separator', () => {
     assert.equal(isWindowsAppsPath('C:\\Users\\me\\Claude\\resources\\app.asar'), false);
 });
 
-test('re-signs macOS apps without a shell and verifies the result', () => {
-    const calls = [];
-    reSignMacApp('/Applications/Claude Test.app', (command, args) => {
-        calls.push({ command, args });
-    });
+const fs = require('node:fs');
+const os = require('node:os');
 
-    assert.deepEqual(calls.map(({ command }) => command), ['xattr', 'codesign', 'codesign', 'codesign']);
-    assert.deepEqual(calls[1].args, ['--remove-signature', '--deep', '/Applications/Claude Test.app']);
-    assert.deepEqual(calls[2].args.slice(0, 4), ['--force', '--deep', '--sign', '-']);
-    assert.equal(calls[2].args.at(-1), '/Applications/Claude Test.app');
-    assert.deepEqual(calls[3].args.slice(0, 3), ['--verify', '--deep', '--strict']);
+test('Linux detection follows the actual desktop launcher and executable symlink', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rtl-discovery-'));
+    try {
+        for (const dir of ['data/applications', 'bin', 'installed/resources']) fs.mkdirSync(path.join(root, dir), { recursive: true });
+        fs.writeFileSync(path.join(root, 'installed/resources/app.asar'), 'fixture');
+        fs.writeFileSync(path.join(root, 'installed/claude-desktop'), 'fixture');
+        fs.symlinkSync(path.join(root, 'installed/claude-desktop'), path.join(root, 'bin/custom-claude'));
+        fs.writeFileSync(path.join(root, 'data/applications/com.anthropic.Claude.desktop'), '[Desktop Entry]\nExec=custom-claude %U\n');
+        const env = { HOME: root, XDG_DATA_HOME: path.join(root, 'data'), XDG_DATA_DIRS: path.join(root, 'none'), PATH: path.join(root, 'bin') };
+        const paths = resolveAppPaths({ platform: 'linux', env });
+        assert.equal(paths.asarPath, path.join(root, 'installed/resources/app.asar'));
+        assert.equal(paths.executablePath, path.join(root, 'installed/claude-desktop'));
+        fs.writeFileSync(path.join(root, 'data/applications/com.anthropic.Claude.desktop'), '[Desktop Entry]\nExec=/bin/sh wrapper\n');
+        assert.throws(() => resolveAppPaths({ platform: 'linux', env }), /wrapper|Flatpak|AppImage/);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+for (const form of ['app', 'resources', 'app.asar', 'executable']) {
+    test(`resolves a Linux custom ${form} path`, () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rtl-path-'));
+        try {
+            fs.mkdirSync(path.join(root, 'resources'));
+            fs.writeFileSync(path.join(root, 'resources', 'app.asar'), 'fixture');
+            fs.writeFileSync(path.join(root, 'claude-desktop'), 'fixture');
+            const customPath = { app: root, resources: path.join(root, 'resources'), 'app.asar': path.join(root, 'resources', 'app.asar'), executable: path.join(root, 'claude-desktop') }[form];
+            assert.equal(resolveAppPaths({ customPath, platform: 'linux' }).asarPath, path.join(root, 'resources', 'app.asar'));
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true });
+        }
+    });
+}

@@ -1,372 +1,101 @@
 #!/usr/bin/env node
 
-const fs = require('fs');
-const path = require('path');
-const asar = require('@electron/asar');
-const plist = require('plist');
-const crypto = require('crypto');
-const chalk = require('chalk');
-const ora = require('ora');
-const figlet = require('figlet');
-const inquirer = require('inquirer');
-const { CSS_INJECT_FULL, CSS_INJECT_FONT_ONLY } = require('./lib/css');
+const fs = require('node:fs');
+const path = require('node:path');
+const { parseArgs } = require('node:util');
+const { execFileSync } = require('node:child_process');
 const { resolveAppPaths, isWindowsAppsPath } = require('./lib/platform');
-const { reSignMacApp } = require('./lib/macos');
-const { computeUnpackGlob } = require('./lib/unpack');
-const { disableAsarIntegrityFuse } = require('./lib/fuses');
+const { buildPreload } = require('./lib/renderer');
 
-const isMac = process.platform === 'darwin';
-const isWin = process.platform === 'win32';
-const isLinux = process.platform === 'linux';
-
-// Allow user to pass a custom path or a restore flag as an argument
-const customPathArg = process.argv.find(arg => arg.includes('Claude') || arg.includes('app.asar') || arg.includes('resources'));
-const isRestoreFlag = process.argv.includes('--restore');
-const isPatchFlag = process.argv.includes('--patch');
-const isFontOnlyFlag = process.argv.includes('--font-only');
-const isForceFullFlag = process.argv.includes('--full') || process.argv.includes('--rtl');
-const isAuto = isRestoreFlag || isPatchFlag || isFontOnlyFlag || isForceFullFlag;
-
-// Claude Desktop shipped native RTL support starting around this version.
-// NOTE for maintainers: bump this the moment a release is confirmed to render
-// Persian/Arabic/Hebrew correctly out of the box in the Chat tab (not just Code).
-// Until then this is a best-effort guess and the user can always override with
-// --font-only or --full.
-const NATIVE_RTL_MIN_VERSION = '1.2.0'; // TODO: confirm against real changelog
-
-function compareVersions(a, b) {
-    const pa = a.split('.').map(Number);
-    const pb = b.split('.').map(Number);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-        const na = pa[i] || 0, nb = pb[i] || 0;
-        if (na !== nb) return na - nb;
-    }
-    return 0;
+function parseOptions(args) {
+    const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
+        path: { type: 'string' }, full: { type: 'boolean' }, rtl: { type: 'boolean' },
+        'font-only': { type: 'boolean' }, patch: { type: 'boolean' }, restore: { type: 'boolean' },
+        diagnose: { type: 'boolean' }, 'dry-run': { type: 'boolean' }, status: { type: 'boolean' },
+        json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' }
+    } });
+    if (positionals.length > 1 || (values.path && positionals.length)) throw new Error('Provide one installation path.');
+    const full = values.full || values.rtl;
+    if ([full, values['font-only'], values.restore].filter(Boolean).length > 1) throw new Error('Choose one operation: --full, --font-only, or --restore.');
+    const mode = full ? 'full' : values['font-only'] ? 'font-only' : null;
+    const readOnly = values.diagnose || values['dry-run'] || values.status;
+    if (values.restore && readOnly) throw new Error('Choose one operation: diagnosis or restore.');
+    if (values.patch && !mode && !readOnly) throw new Error('Choose --full or --font-only explicitly; native RTL cannot be inferred from a version.');
+    return { action: values.help ? 'help' : readOnly ? 'diagnose' : values.restore ? 'restore' : mode ? 'patch' : 'menu', mode, customPath: values.path || positionals[0], json: values.json };
 }
 
-function detectInstalledVersion(appPath, resourcesPath) {
-    try {
-        if (isMac) {
-            const infoPlistPath = path.join(appPath, 'Contents', 'Info.plist');
-            if (fs.existsSync(infoPlistPath)) {
-                const parsed = plist.parse(fs.readFileSync(infoPlistPath, 'utf8'));
-                if (parsed?.CFBundleShortVersionString) return parsed.CFBundleShortVersionString;
-            }
-        }
-        const pkgPath = path.join(resourcesPath, 'app-update.yml');
-        if (fs.existsSync(pkgPath)) {
-            const match = fs.readFileSync(pkgPath, 'utf8').match(/version:\s*([\d.]+)/);
-            if (match) return match[1];
-        }
-    } catch (e) {
-        // ignore — fall through to null (unknown version)
-    }
-    return null;
-}
-
-let resolvedPaths;
-try {
-    resolvedPaths = resolveAppPaths({ customPath: customPathArg, platform: process.platform });
-} catch (error) {
-    console.error(chalk.red(`[!] ${error.message}`));
-    process.exit(1);
-}
-const {
-    appPath: CLAUDE_APP_PATH,
-    resourcesPath: RESOURCES_PATH,
-    infoPlistPath: INFO_PLIST_PATH,
-    asarPath: ASAR_PATH,
-    backupPath: BACKUP_PATH
-} = resolvedPaths;
-const TEMP_DIR = path.join(require('os').tmpdir(), 'claude-rtl-patcher-temp');
-
-function updateMacAsarIntegrity(asarPath, infoPlistPath) {
-    if (!isMac || !infoPlistPath || !fs.existsSync(infoPlistPath)) return;
-
-    const fileBuffer = fs.readFileSync(asarPath);
-    const newHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-    const plistData = fs.readFileSync(infoPlistPath, 'utf8');
-    const parsed = plist.parse(plistData);
-    if (parsed?.ElectronAsarIntegrity?.['Resources/app.asar']) {
-        parsed.ElectronAsarIntegrity['Resources/app.asar'].hash = newHash;
-        fs.writeFileSync(infoPlistPath, plist.build(parsed));
-    }
-}
-
-function restoreMacAppState(asarPath, infoPlistPath, appPath) {
-    updateMacAsarIntegrity(asarPath, infoPlistPath);
-    if (appPath) reSignMacApp(appPath);
-}
-
-async function restoreClaude() {
-    console.log('');
-    const spinner = ora('Restoring original Claude app...').start();
-    if (!fs.existsSync(BACKUP_PATH)) {
-        spinner.fail(chalk.red('No backup found! Claude is already in its original state.'));
-        process.exit(1);
-    }
-    const originalInfoPlist = isMac && INFO_PLIST_PATH && fs.existsSync(INFO_PLIST_PATH)
-        ? fs.readFileSync(INFO_PLIST_PATH)
-        : null;
-    try {
-        fs.copyFileSync(BACKUP_PATH, ASAR_PATH);
-        if (isMac && INFO_PLIST_PATH) {
-            // The backup is the source of truth after a restore; update the
-            // Electron integrity entry and make the bundle launchable again.
-            restoreMacAppState(ASAR_PATH, INFO_PLIST_PATH, CLAUDE_APP_PATH);
-        }
-        spinner.succeed(chalk.green('Original Claude restored successfully!'));
-        console.log(chalk.gray('Restart Claude to see the changes.'));
-    } catch(e) {
-        if (originalInfoPlist) fs.writeFileSync(INFO_PLIST_PATH, originalInfoPlist);
-        spinner.fail(chalk.red('Failed to restore backup: ' + e.message));
-        process.exit(1);
-    }
-}
-
-async function patchClaude(fontOnlyOverride) {
-    let fontOnly;
-    let autoNote = '';
-    if (fontOnlyOverride === true || isFontOnlyFlag) {
-        fontOnly = true;
-    } else if (fontOnlyOverride === false || isForceFullFlag) {
-        fontOnly = false;
-    } else {
-        const detectedVersion = detectInstalledVersion(CLAUDE_APP_PATH, RESOURCES_PATH);
-        if (detectedVersion && compareVersions(detectedVersion, NATIVE_RTL_MIN_VERSION) >= 0) {
-            fontOnly = true;
-            autoNote = `Detected Claude v${detectedVersion} (native RTL) — applying Vazirmatn font only.`;
-        } else {
-            fontOnly = false;
-            autoNote = detectedVersion
-                ? `Detected Claude v${detectedVersion} (pre-native-RTL) — applying full RTL + font patch.`
-                : `Could not detect Claude version — applying full RTL + font patch to be safe. Use --font-only to override.`;
-        }
-    }
-    const cssPayload = fontOnly ? CSS_INJECT_FONT_ONLY : CSS_INJECT_FULL;
-    const jsPayload = `
-// Injected for Persian/Arabic/Hebrew support
-try { 
-  require('electron/renderer').webFrame.insertCSS(\`${cssPayload.replace(/\n/g, ' ')}\`); 
-  console.log("%c✨ ${fontOnly ? 'Vazirmatn font applied' : 'RTL applied'} by Rick Sanchez and Vazirmatn font used in memory of Saber Rastikerdar ✨", "color: #00e5ff; font-size: 14px; font-weight: bold; background: #222; padding: 5px; border-radius: 5px;");
-} catch(e) {}
+const HELP = `Claude RTL patcher (MIT, upstream by Rick Sanchez & Contributors)
+Usage: node index.js [--path /path/to/app.asar] <operation>
+  --diagnose, --dry-run, --status   Read-only build, targets and backup status
+  --full, --rtl                  Explicit scoped RTL + Vazirmatn patch
+  --font-only                    Typography only; no direction changes
+  --restore                      Restore the exact backed-up build
+  --json                         Machine-readable result
+Quit Claude completely before apply/restore. Re-run diagnosis after every update.
+No version threshold verifies native RTL. Signed macOS/MSIX and read-only
+AppImage/Flatpak containers are not modified; no security checks are disabled.
 `;
-    console.log('');
-    if (autoNote) console.log(chalk.blue(`[i] ${autoNote}`));
 
-    // Windows MSIX/AppX installs live under WindowsApps, which is owned by
-    // TrustedInstaller and isn't writable even as Administrator. Worse, MSIX
-    // has its own package-integrity verification, so even a forced write is
-    // likely to get silently reverted by Windows. Fail fast with a clear
-    // explanation instead of a confusing EPERM mid-backup (see issue #6).
-    if (isWin && isWindowsAppsPath(ASAR_PATH)) {
-        console.error(chalk.red('[!] Claude Desktop appears to be installed as an MSIX/AppX package:'));
-        console.error(chalk.red(`    ${ASAR_PATH}`));
-        console.log(chalk.yellow('This location is locked by Windows (TrustedInstaller-owned) and is not writable,'));
-        console.log(chalk.yellow('even as Administrator. MSIX packages also carry their own integrity checks that'));
-        console.log(chalk.yellow('can silently revert in-place patches even if the write succeeded.'));
-        console.log(chalk.yellow('This tool currently does not support MSIX installs of Claude Desktop on Windows.'));
-        process.exit(1);
-    }
-
-    if (!fs.existsSync(ASAR_PATH)) {
-        console.error(chalk.red(`[!] Claude app not found at ${ASAR_PATH}.`));
-        console.log(chalk.yellow('If you installed Claude in a custom location, you can pass the path as an argument:'));
-        console.log(chalk.yellow('npx claude-rtl-patcher /your/custom/path/to/Claude'));
-        process.exit(1);
-    }
-
-    let spinner = ora('Creating backup of original app...').start();
-    try {
-        if (!fs.existsSync(BACKUP_PATH)) fs.copyFileSync(ASAR_PATH, BACKUP_PATH);
-        spinner.succeed(chalk.green('Backup created (or already exists).'));
-    } catch (e) {
-        spinner.fail(chalk.red('Backup failed!'));
-        console.error(e);
-        process.exit(1);
-    }
-
-    if (fs.existsSync(TEMP_DIR)) fs.rmSync(TEMP_DIR, { recursive: true, force: true });
-    fs.mkdirSync(TEMP_DIR, { recursive: true });
-
-    // Snapshot which files are already unpacked next to the original asar
-    // BEFORE touching anything, so repacking keeps the same set on disk as
-    // real files instead of collapsing them into a hardcoded extension list
-    // (a hardcoded list is what causes "Malformed Mach-o file" — any native
-    // binary that doesn't match, like a Claude Code helper, silently ends up
-    // packed INTO the archive, and the OS can't exec a byte range of it).
-    const unpackGlob = computeUnpackGlob(ASAR_PATH);
-
-    spinner = ora('Extracting app.asar...').start();
-    try {
-        asar.extractAll(ASAR_PATH, TEMP_DIR);
-        spinner.succeed(chalk.green('App extracted successfully.'));
-    } catch(e) {
-        spinner.fail(chalk.red('Extraction failed: ' + e.message + '. Restoring backup...'));
-        if (fs.existsSync(BACKUP_PATH)) fs.copyFileSync(BACKUP_PATH, ASAR_PATH);
-        process.exit(1);
-    }
-
-    spinner = ora('Injecting RTL styles and Vazirmatn font...').start();
-    try {
-        const injectIntoFiles = (dir) => {
-            if (!fs.existsSync(dir)) return;
-            const files = fs.readdirSync(dir);
-            for (const file of files) {
-                const fullPath = path.join(dir, file);
-                if (fs.statSync(fullPath).isDirectory()) {
-                    injectIntoFiles(fullPath);
-                } else if (fullPath.endsWith('.css')) {
-                    let content = fs.readFileSync(fullPath, 'utf8');
-                    // Strip any prior patch so re-patching replaces with the latest payload cleanly
-                    content = content.replace(/\/\*\s*RTL and Vazirmatn Font Patch[\s\S]*$/, '');
-                    content = content.replace(/\/\*\s*Vazirmatn Font Patch[\s\S]*$/, '');
-                    fs.writeFileSync(fullPath, content.trimEnd() + '\n' + cssPayload);
-                } else if (fullPath.endsWith('.js')) {
-                    // Exact basenames only. A substring check against the full
-                    // path (e.g. fullPath.includes('buddy')) also matches
-                    // unrelated compiled renderer assets that merely live
-                    // under a "buddy_window" directory (main-XXXX.js,
-                    // BuddyWindow-XXXX.js, ...), double-injecting the CSS
-                    // there while the actual window bootstrap files it's
-                    // asymmetrically written for (main_window, quick_window,
-                    // about_window, find_in_page — underscored, so they never
-                    // matched the camelCase substrings anyway) get skipped.
-                    // Those windows already receive the same styles via the
-                    // unconditional .css injection above, so this JS
-                    // injection only needs to target the specific top-level
-                    // bootstrap scripts under .vite/build/.
-                    const BOOTSTRAP_JS_FILES = new Set([
-                        'mainView.js', 'mainWindow.js', 'buddy.js',
-                        'quickWindow.js', 'aboutWindow.js', 'findInPage.js'
-                    ]);
-                    if (BOOTSTRAP_JS_FILES.has(path.basename(fullPath))) {
-                        let content = fs.readFileSync(fullPath, 'utf8');
-                        // Strip any prior JS payload so re-patching replaces cleanly
-                        content = content.replace(/\/\/\s*Injected for Persian\/Arabic\/Hebrew support[\s\S]*$/, '');
-                        fs.writeFileSync(fullPath, content.trimEnd() + '\n' + jsPayload);
-                    }
-                }
-            }
-        };
-
-        injectIntoFiles(path.join(TEMP_DIR, '.vite', 'build'));
-        injectIntoFiles(path.join(TEMP_DIR, '.vite', 'renderer'));
-        spinner.succeed(chalk.green('Styles successfully injected!'));
-    } catch(e) {
-        spinner.fail(chalk.red('Patching failed. Restoring backup...'));
-        fs.copyFileSync(BACKUP_PATH, ASAR_PATH);
-        process.exit(1);
-    }
-
-    spinner = ora('Repacking app.asar (this takes a few seconds)...').start();
-    try {
-        await asar.createPackageWithOptions(TEMP_DIR, ASAR_PATH, { unpack: unpackGlob });
-        spinner.succeed(chalk.green('App repacked.'));
-    } catch(e) {
-        spinner.fail(chalk.red('Packing failed. Restoring backup...'));
-        fs.copyFileSync(BACKUP_PATH, ASAR_PATH);
-        process.exit(1);
-    }
-
-    if (isMac && INFO_PLIST_PATH) {
-        spinner = ora('Updating macOS security hashes and bypassing Gatekeeper...').start();
-        const originalInfoPlist = fs.existsSync(INFO_PLIST_PATH)
-            ? fs.readFileSync(INFO_PLIST_PATH)
-            : null;
+function runningPids(executable) {
+    if (process.platform !== 'linux' || !executable) return [];
+    executable = fs.realpathSync(executable);
+    return fs.readdirSync('/proc').filter(name => /^\d+$/.test(name)).filter(pid => {
         try {
-            updateMacAsarIntegrity(ASAR_PATH, INFO_PLIST_PATH);
-
-            // The real ASAR integrity check Electron enforces at launch is a
-            // fuse baked into the Electron Framework binary, not the
-            // ElectronAsarIntegrity key in Info.plist (that's a separate,
-            // legacy mechanism some build tools also happen to write, and
-            // updating it alone does NOT stop the "Integrity check failed"
-            // crash). Disable the real fuse via Electron's own tooling.
-            disableAsarIntegrityFuse(CLAUDE_APP_PATH);
-
-            // Re-sign the entire bundle ad-hoc and verify it. Do not hide failures:
-            // an unsigned or partially signed app cannot launch on Apple Silicon.
-            reSignMacApp(CLAUDE_APP_PATH);
-            spinner.succeed(chalk.green('macOS Security passed!'));
-        } catch(e) {
-            spinner.fail(chalk.red('Security bypass failed. Restoring backup...'));
-            fs.copyFileSync(BACKUP_PATH, ASAR_PATH);
-            if (originalInfoPlist) fs.writeFileSync(INFO_PLIST_PATH, originalInfoPlist);
-            process.exit(1);
+            return fs.readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, '') === executable && !fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('--type=');
+        } catch (error) {
+            if (['ENOENT', 'ESRCH', 'EACCES', 'EPERM'].includes(error.code)) return false;
+            throw error;
         }
-    }
-
-    fs.rmSync(TEMP_DIR, { recursive: true, force: true });
-    
-    console.log('\n=================================================');
-    if (fontOnly) {
-        console.log(chalk.bold.green('✨ DONE! Vazirmatn font applied (RTL/direction left untouched).'));
-    } else {
-        console.log(chalk.bold.green('✨ DONE! Claude is now optimized for RTL languages!'));
-    }
-    console.log(chalk.gray('Please FULLY RESTART Claude to apply changes.'));
-    console.log('=================================================\n');
-}
-
-async function main() {
-    console.log(chalk.cyan(figlet.textSync('Claude RTL', { horizontalLayout: 'full' })));
-    console.log(chalk.bold.blue('        Global Patcher by Rick Sanchez'));
-    console.log('\n');
-
-    if (isRestoreFlag) {
-        await restoreClaude();
-        return;
-    }
-    if (isPatchFlag || isFontOnlyFlag || isForceFullFlag) {
-        await patchClaude();
-        return;
-    }
-
-    // Interactive CLI Menu
-    const answers = await inquirer.prompt([
-        {
-            type: 'list',
-            name: 'action',
-            message: 'What would you like to do?',
-            choices: [
-                { name: '🔍 Auto-detect (recommended — font-only on new Claude, full RTL patch on old)', value: 'auto' },
-                { name: '✨ Force Full RTL Patch & Vazirmatn Font (Persian/Arabic/Hebrew)', value: 'patch' },
-                { name: '🔤 Force Vazirmatn Font Only (no RTL/direction changes)', value: 'font-only' },
-                { name: '⏪ Restore Original Claude (Remove Patch)', value: 'restore' },
-                { name: '❌ Exit', value: 'exit' }
-            ]
-        }
-    ]);
-
-    if (answers.action === 'auto') {
-        await patchClaude();
-    } else if (answers.action === 'patch') {
-        await patchClaude(false);
-    } else if (answers.action === 'font-only') {
-        await patchClaude(true); // force font-only payload regardless of CLI flags
-    } else if (answers.action === 'restore') {
-        await restoreClaude();
-    } else {
-        console.log(chalk.yellow('Goodbye!'));
-        process.exit(0);
-    }
-}
-
-if (require.main === module) {
-    main().catch(err => {
-        console.error(chalk.red('\n[!] UNEXPECTED ERROR: ' + err.message));
-        if (fs.existsSync(BACKUP_PATH)) fs.copyFileSync(BACKUP_PATH, ASAR_PATH);
-        console.log(chalk.yellow('\nClaude app has been restored to safety.'));
-        process.exit(1);
     });
 }
 
-module.exports = {
-    CSS_INJECT_FULL,
-    CSS_INJECT_FONT_ONLY,
-    compareVersions,
-    detectInstalledVersion,
-    patchClaude,
-    restoreClaude
-};
+function commandOutput(command, args) {
+    try { return execFileSync(command, args, { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
+    catch { return null; }
+}
+
+async function main(args = process.argv.slice(2)) {
+    const options = parseOptions(args);
+    if (options.action === 'help') { console.log(HELP); return; }
+    if (options.action === 'menu') {
+        if (!process.stdin.isTTY) throw new Error('Choose --diagnose, --full, --font-only or --restore. Use --help for details.');
+        const { action } = await require('inquirer').prompt([{ type: 'list', name: 'action', message: 'Choose an explicit operation (native RTL is unverified):', choices: [
+            { name: 'Read-only diagnosis', value: '--diagnose' },
+            { name: 'Scoped RTL + Vazirmatn', value: '--full' },
+            { name: 'Vazirmatn only; keep native direction', value: '--font-only' },
+            { name: 'Restore exact original build', value: '--restore' },
+            { name: 'Exit', value: 'exit' }
+        ] }]);
+        if (action === 'exit') return;
+        return main([action, ...(options.customPath ? ['--path', options.customPath] : [])]);
+    }
+    const paths = resolveAppPaths({ customPath: options.customPath });
+    const archive = require('./lib/archive');
+    const executable = paths.executablePath || [path.join(paths.appPath, 'claude-desktop'), path.join(paths.appPath, 'claude')].find(file => fs.existsSync(file));
+    const before = archive.diagnose(paths.asarPath);
+    const binaryVersion = options.action !== 'diagnose' && executable ? commandOutput(executable, ['--version']) : null;
+    if (options.action !== 'diagnose' && binaryVersion && binaryVersion !== before.version) throw new Error('Binary and ASAR versions disagree. Reassess the installed build before patching.');
+    let result = before;
+    if (options.action !== 'diagnose') {
+        if (process.platform !== 'linux' || isWindowsAppsPath(paths.asarPath)) throw new Error('In-place patching is only supported on writable Linux ASAR installations; signatures and integrity protections will not be bypassed.');
+        if (/\/(?:flatpak|\.mount_)/.test(paths.asarPath) || fs.existsSync(`${paths.asarPath}.sig`)) throw new Error('Signed or read-only container detected; refusing in-place changes.');
+        const pids = runningPids(executable);
+        if (pids.length) throw new Error(`Quit Claude through its own Quit menu before ${options.action} (running PID: ${pids.join(', ')}).`);
+        fs.accessSync(path.dirname(paths.asarPath), fs.constants.W_OK);
+        result = options.action === 'restore' ? await archive.restore(paths.asarPath) : await archive.applyPatch(paths.asarPath, { mode: options.mode, payload: buildPreload(options.mode) });
+    }
+    const owner = commandOutput('pacman', ['-Qoq', paths.asarPath]);
+    const report = { ...result, asarPath: paths.asarPath, resourcesPath: paths.resourcesPath, executablePath: executable || null, launcherPath: paths.launcherPath || null,
+        architecture: process.arch, package: owner ? commandOutput('pacman', ['-Q', owner]) : null, binaryVersion,
+        nativeRTL: 'unverified; select a mode explicitly', operation: options.action, requestedMode: options.mode,
+        restartRequired: options.action !== 'diagnose' };
+    console.log(options.json ? JSON.stringify(report, null, 2) : Object.entries(report).map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value ?? 'unknown'}`).join('\n'));
+}
+
+if (require.main === module) main().catch(error => {
+    console.error(`Error: ${error.message}`);
+    if (['EACCES', 'EPERM'].includes(error.code)) console.error('The installation is protected. Use an existing authorized privilege mechanism to run this same command; never run the GUI as root.');
+    process.exitCode = 1;
+});
+
+module.exports = { parseOptions, runningPids, main };
