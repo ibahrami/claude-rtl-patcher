@@ -90,14 +90,86 @@ test('real Chromium: self-only font CSP, mixed prose, streaming, selection, font
         await page.evaluate(() => detachedFixture.remove());
         await page.waitForFunction(() => !__claudeRtlPatch.roots.has(detachedFixture), { timeout: 2000 });
     });
+    await t.test('task rows and question cards apply RTL without moving icons or shortcuts incorrectly', async () => {
+        await page.evaluate(() => {
+            const container = document.createElement('section');
+            container.id = 'interactive-fixture';
+            container.innerHTML = `
+              <ul id="task-list" role="list" style="list-style:none;padding:0">
+                <li id="task-row" style="display:flex;gap:8px">
+                  <span id="task-icon" class="epitaxy-markdown-first-line" style="font-family:monospace;flex-shrink:0">✓<span class="sr-only">not done</span></span>
+                  <div class="epitaxy-markdown-inherit-color" style="flex:1"><span id="task-label" style="font-family:serif">API بررسی متن فارسی</span></div>
+                </li>
+              </ul>
+              <div id="question-card" data-cds="AskUserQuestion" role="group" style="font-family:Arial">
+                <div id="question-label" style="font-family:serif">API آیا این متن آزمایشی فارسی درست است؟</div>
+                <div style="display:flex;gap:8px">
+                  <button id="answer-yes" style="font-family:Arial;display:inline-flex;gap:4px">بله، درست است <kbd id="shortcut">Ctrl+Enter</kbd></button>
+                  <button id="answer-no" style="font-family:Arial">خیر</button>
+                </div>
+                <input id="question-other" type="text" style="font-family:Arial" value="" />
+              </div>
+              <div data-ask-user-input-banner><span id="legacy-question">پرسش فارسی برای آزمایش نمایش</span></div>
+              <div data-testid="ask-user-answers-card"><div id="answered-question">API پرسش فارسی پاسخ داده شد</div></div>
+              <div class="epitaxy-question-receipt"><div id="native-receipt" style="unicode-bidi:plaintext">API پرسش فارسی پاسخ داده شد</div></div>
+              <div id="unrelated-card" style="display:flex"><span>English controls</span><button id="unrelated-button" style="font-family:Arial">English</button></div>`;
+            document.body.append(container);
+            document.querySelector('#answer-yes').onclick = () => { document.querySelector('#question-card').dataset.answer = 'yes'; };
+        });
+        await page.waitForFunction(() => document.querySelector('#task-row').dataset.rtlDir === 'rtl', { timeout: 2000 });
+        const result = await page.evaluate(() => {
+            const ids = ['task-row', 'task-label', 'question-card', 'question-label', 'answered-question', 'native-receipt', 'answer-yes', 'answer-no', 'legacy-question', 'shortcut', 'unrelated-card', 'unrelated-button'];
+            return Object.fromEntries(ids.map(id => {
+                const node = document.getElementById(id), style = getComputedStyle(node), box = node.getBoundingClientRect();
+                return [id, { direction: style.direction, font: style.fontFamily, x: box.x }];
+            }));
+        });
+        for (const id of ['task-row', 'task-label', 'question-card', 'question-label', 'answered-question', 'native-receipt', 'answer-yes', 'answer-no', 'legacy-question']) {
+            assert.equal(result[id].direction, 'rtl', id);
+            assert.match(result[id].font, /Vazirmatn/, id);
+        }
+        assert.equal(await page.$eval('#native-receipt', node => getComputedStyle(node).unicodeBidi), 'isolate');
+        assert.ok(await page.$eval('#task-icon', icon => icon.getBoundingClientRect().x > document.querySelector('#task-label').getBoundingClientRect().right));
+        assert.ok(result['answer-yes'].x > result['answer-no'].x);
+        assert.equal(result.shortcut.direction, 'ltr');
+        assert.match(result.shortcut.font, /monospace/);
+        assert.equal(result['unrelated-card'].direction, 'ltr');
+        assert.equal(result['unrelated-button'].font, 'Arial');
+        await page.click('#answer-yes');
+        assert.equal(await page.$eval('#question-card', node => node.dataset.answer), 'yes');
+        await page.focus('#answer-no');
+        await page.keyboard.down('Shift');
+        await page.keyboard.press('Tab');
+        await page.keyboard.up('Shift');
+        assert.equal(await page.evaluate(() => document.activeElement.id), 'answer-yes');
+        await page.$eval('#question-card', node => { delete node.dataset.answer; });
+        await page.keyboard.press('Enter');
+        assert.equal(await page.$eval('#question-card', node => node.dataset.answer), 'yes');
+        await page.type('#question-other', 'API این یک پاسخ فارسی است');
+        await page.waitForFunction(() => document.querySelector('#question-other').dataset.rtlDir === 'rtl', { timeout: 2000 });
+        assert.equal(await page.$eval('#question-other', node => node.value), 'API این یک پاسخ فارسی است');
+        await page.evaluate(() => document.querySelector('#question-label').firstChild.data = 'English question');
+        await page.waitForFunction(() => document.querySelector('#question-label').dataset.rtlDir === 'ltr', { timeout: 2000 });
+        await page.evaluate(() => {
+            const list = document.createElement('ul');
+            list.id = 'deferred-tasks'; list.setAttribute('role', 'list');
+            document.body.append(list);
+        });
+        await page.evaluate(() => {
+            document.querySelector('#deferred-tasks').innerHTML = '<li><span class="epitaxy-markdown-first-line">o</span><div>بررسی متن فارسی</div></li>';
+        });
+        await page.waitForFunction(() => document.querySelector('#deferred-tasks').dataset.rtlDir === 'rtl', { timeout: 2000 });
+    });
     await t.test('font-only truly preserves native bidi even on streamed text', async () => {
         const second = await browser.newPage();
         await second.goto(`http://127.0.0.1:${server.address().port}`);
-        await second.setContent('<main><div class="standard-markdown"><p id="native" dir="rtl">API برای آزمایش</p></div></main>');
+        await second.setContent('<main><div class="standard-markdown"><p id="native" dir="rtl">API برای آزمایش</p></div><div data-cds="AskUserQuestion" dir="ltr" id="native-question"><button id="native-answer">پاسخ فارسی</button></div></main>');
         await second.addStyleTag({ content: CSS_INJECT_FONT_ONLY });
         await second.addScriptTag({ content: rendererScript('font-only') });
         await second.$eval('#native', node => node.firstChild.data += ' است');
         assert.deepEqual(await second.$eval('#native', node => [node.dir, node.hasAttribute('data-rtl-dir'), getComputedStyle(node).direction]), ['rtl', false, 'rtl']);
+        assert.deepEqual(await second.$eval('#native-question', node => [node.dir, node.hasAttribute('data-rtl-dir'), getComputedStyle(node).direction]), ['ltr', false, 'ltr']);
+        assert.equal(await second.$eval('#native-answer', node => getComputedStyle(node).direction), 'ltr');
         await second.close();
     });
 });
